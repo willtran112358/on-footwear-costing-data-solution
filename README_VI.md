@@ -8,13 +8,70 @@ Case study quản trị dữ liệu doanh nghiệp cho **costing ngành giày**:
 
 **Lưu ý:** Repo dùng **dữ liệu giả lập** và **kiến trúc giả định**. Đây là dự án portfolio độc lập, **không liên kết với On AG**.
 
+**Chi tiết:** [BRD](docs/01-business-requirements.md) · [Kiến trúc hiện trạng](docs/02-as-is-architecture.md) · [Kiến trúc mục tiêu](docs/03-target-architecture.md) · [Governance](docs/04-data-governance.md) · [Roadmap 90 ngày](docs/05-implementation-roadmap.md)
+
 ---
 
-## Tổng quan kiến trúc
+## 1. Business — pain point & yêu cầu giải pháp
+
+### Bối cảnh nghiệp vụ
+
+Brand giày thể thao scale theo **season**, **colorway**, **size curve**. Costing gồm **should-cost** (phát triển / đàm phán), **standard cost** (ERP), **actual / landed cost** (PO, freight, FX). Specialist data phải **sở hữu dữ liệu costing end-to-end** giữa PLM, ERP, supply chain và finance.
+
+### Pain point (hiện trạng)
+
+| Pain point | Tác động kinh doanh |
+|------------|---------------------|
+| BOM / version lệch giữa PLM và ERP | Sai standard cost, rò margin |
+| Tổng hợp costing bằng Excel | Chậm theo season, lỗi thủ công |
+| Biến động FX / freight / MOQ | Landed cost không ổn định |
+| Đa nhà máy, đa tiền tệ | COGS không nhất quán |
+| Thiếu lineage & ownership | Rủi ro audit, UAT chậm |
+
+### Triệu chứng → nguyên nhân gốc
+
+| Triệu chứng | Nguyên nhân gốc | Tác động |
+|-------------|-----------------|----------|
+| Lệch margin khi mở season | Should-cost cũ so với standard đã release | Trễ quyết định giá |
+| Tranh chấp với nhà máy về định mức | BOM PLM ≠ ERP | Rework, claim |
+| Đóng sổ chậm | Phân bổ actual cost thủ công | OT Finance |
+
+### Yêu cầu giải pháp (solution requirements)
+
+| ID | Yêu cầu | Ưu tiên | Chỉ số thành công |
+|----|---------|---------|-------------------|
+| BR-01 | Golden key SKU (style-color-size-factory-season) | P0 | 99% SKU active có một key |
+| BR-02 | Đối soát BOM PLM–ERP hàng ngày + hàng đợi exception | P0 | <0.5% lệch chưa xử lý >48h |
+| BR-03 | Báo cáo should / standard / actual variance | P0 | Hỗ trợ close sổ T+3 |
+| BR-04 | Lineage trên mọi trường cost | P1 | 100% trường tiền có `source_id` |
+| BR-05 | Cảnh báo ngưỡng (variance, BOM, FX) | P1 | MTTR lệch < 2 ngày làm việc |
+| BR-06 | UAT + rollback khi release cost | P0 | Không rollback ngoài ý muốn ở pilot |
+| BR-07 | Catalog + glossary (FOB, LDP, COGS) | P2 | Glossary dùng bởi ≥3 bộ phận |
+
+### Pain point → trụ cột giải pháp
+
+| Pain point | Trụ cột giải pháp |
+|------------|-------------------|
+| Lệch BOM / version | Golden record + đối soát hàng ngày |
+| Excel roll-up | Pipeline tự động + rule DQ |
+| FX / freight | Cost engine tham số hóa + alert |
+| Đa nhà máy / tiền tệ | MDM hub + chính sách FX |
+| Thiếu lineage | Governance + data catalog |
+
+### Phi chức năng (tóm tắt)
+
+- **Freshness:** mart costing T+1 (BOM critical gần real-time).
+- **Quality:** DQ tự động, có owner từng domain.
+- **Security:** RBAC theo region / factory.
+- **Compliance:** log bất biến cho standard cost post.
+
+---
+
+## 2. Kiến trúc (Architecture)
 
 ### Hiện trạng (As-is) — hệ thống costing phân mảnh
 
-Vấn đề điển hình: Excel là cầu nối thủ công; BOM lệch phiên bản; báo cáo không tự động.
+Excel là cầu nối thủ công; BOM lệch phiên bản; báo cáo không tự động.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {'fontFamily': 'Segoe UI, sans-serif', 'fontSize': '14px'}}}%%
@@ -50,15 +107,7 @@ flowchart LR
   style PBI fill:#FFA726,stroke:#E65100,color:#fff
 ```
 
-| Triệu chứng | Nguyên nhân gốc | Tác động kinh doanh |
-|-------------|-----------------|---------------------|
-| Lệch margin khi mở season | Should-cost cũ so với standard đã release | Trễ quyết định giá |
-| Tranh chấp với nhà máy về định mức | BOM PLM ≠ ERP | Rework, claim |
-| Đóng sổ chậm | Phân bổ actual cost thủ công | OT cho Finance |
-
----
-
-### Mục tiêu (To-be) — nền tảng dữ liệu costing có governance
+### Mục tiêu (To-be) — nền tảng dữ liệu có governance
 
 Ingest theo sự kiện, lakehouse medallion, cổng DQ, consumption đã chứng nhận.
 
@@ -126,8 +175,6 @@ flowchart TB
   style SQL2 fill:#5C6BC0,stroke:#283593,color:#fff
 ```
 
----
-
 ### Quy trình costing mục tiêu
 
 ```mermaid
@@ -159,43 +206,39 @@ sequenceDiagram
 
 ---
 
-## Mẫu code theo kiến trúc (đọc nhanh)
+## 3. Engineering — mẫu code
 
-Các đoạn dưới **rút gọn** từ `python/` và `sql/` — map trực tiếp vào sơ đồ To-be ở trên.
+Rút gọn từ `python/` và `sql/` — map vào sơ đồ To-be ở mục 2.
 
-| Tầng kiến trúc | File đầy đủ | Việc làm |
-|----------------|-------------|----------|
-| **Ingest → Bronze** | `python/ingest_plm_bom.py` | Nhận BOM từ PLM, tạo `event_id` idempotent, đẩy event bus |
-| **Silver → DQ** | `sql/dq_bom_reconciliation.sql` | Đối soát BOM PLM vs ERP, xuất exception queue |
-| **Gold → Alert** | `python/costing_reconciliation.py` | So sánh should / standard / actual, gắn cờ vượt ngưỡng |
-| **Gold schema** | `sql/ddl_costing_gold_layer.sql` | Định nghĩa bảng mart costing |
+| Tầng kiến trúc | File | Việc làm |
+|----------------|------|----------|
+| Ingest → Bronze | `python/ingest_plm_bom.py` | Event BOM PLM, `event_id` idempotent |
+| Silver → DQ | `sql/dq_bom_reconciliation.sql` | Đối soát PLM vs ERP |
+| Gold → Alert | `python/costing_reconciliation.py` | Variance should / standard / actual |
+| Gold schema | `sql/ddl_costing_gold_layer.sql` | DDL mart costing |
 
-### 1) Ingest PLM → Bronze (Kafka / landing)
+### 3.1 Ingest PLM → Bronze
 
 ```python
-# python/ingest_plm_bom.py — tầng Ingest
+# python/ingest_plm_bom.py
 def bom_line_hash(product_key, component_id, qty, uom, effective_date) -> str:
     payload = f"{product_key}|{component_id}|{qty}|{uom}|{effective_date}"
     return hashlib.sha256(payload.encode()).hexdigest()
 
 def to_bronze_event(row: dict) -> dict:
     return {
-        "event_id": bom_line_hash(...),      # trùng lặp → cùng key, không double-count
+        "event_id": bom_line_hash(...),
         "source": "PLM",
-        "topic": "costing.plm.bom.v1",       # map vào Event Bus trong sơ đồ
+        "topic": "costing.plm.bom.v1",
         "ingested_at": datetime.now(timezone.utc).isoformat(),
-        "payload": row,                       # BOM line thô
+        "payload": row,
     }
 ```
 
-**Ý nghĩa:** Mỗi dòng BOM là một event; ELT phía sau ghi vào **Bronze** rồi chuẩn hóa lên **Silver**.
-
----
-
-### 2) Đối soát BOM — Silver + DQ
+### 3.2 Đối soát BOM — Silver + DQ
 
 ```sql
--- sql/dq_bom_reconciliation.sql — cổng DQ trước khi publish Gold
+-- sql/dq_bom_reconciliation.sql
 WITH plm AS (
     SELECT product_key, component_id, effective_date,
            SUM(quantity * (1 + scrap_rate)) AS plm_qty
@@ -210,8 +253,7 @@ erp AS (
     WHERE source_system = 'ERP' AND is_current = TRUE
     GROUP BY 1, 2, 3
 )
-SELECT product_key, component_id,
-       plm_qty, erp_qty,
+SELECT product_key, component_id, plm_qty, erp_qty,
        CASE
            WHEN p.product_key IS NULL THEN 'MISSING_IN_PLM'
            WHEN e.product_key IS NULL THEN 'MISSING_IN_ERP'
@@ -220,18 +262,14 @@ SELECT product_key, component_id,
        END AS dq_status
 FROM plm p
 FULL OUTER JOIN erp e USING (product_key, component_id, effective_date)
-WHERE dq_status <> 'OK';   -- chỉ giữ exception → queue cho team Costing
+WHERE dq_status <> 'OK';
 ```
 
-**Ý nghĩa:** Khớp với bước **“Đối soát PLM ↔ ERP”** trong sequence diagram — lệch BOM thì **không** cho costing chạy im lặng.
-
----
-
-### 3) Variance should / standard / actual — Gold + cảnh báo
+### 3.3 Variance costing — Gold + cảnh báo
 
 ```python
-# python/costing_reconciliation.py — tầng Gold / Consumption
-THRESHOLD_PCT = 0.05   # vượt 5% → alert Power BI / email
+# python/costing_reconciliation.py
+THRESHOLD_PCT = 0.05
 
 def enrich_variance(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -239,23 +277,15 @@ def enrich_variance(df: pd.DataFrame) -> pd.DataFrame:
     out["var_std_actual_pct"] = (out["actual"] - out["standard"]) / out["standard"]
     out["alert"] = out["var_std_actual_pct"].abs() > THRESHOLD_PCT
     return out
-
-# Ví dụ output (data/sample_costing.csv):
-#   SKU              should  standard  actual  alert
-#   LIFE-02-WHT-44   42.00   41.50     44.80   True  → điều tra freight / FX / yield
 ```
 
-**Ý nghĩa:** Mart **Gold** (`fact_cost_variance`) phục vụ Control Tower; costing analyst nhận **driver_hint** thay vì chỉ nhìn số thô.
-
----
-
-### 4) DDL Gold layer (schema mart)
+### 3.4 DDL Gold layer
 
 ```sql
--- sql/ddl_costing_gold_layer.sql — ví dụ bảng trung tâm
+-- sql/ddl_costing_gold_layer.sql
 CREATE TABLE gold_costing.fact_cost_variance (
     variance_key        VARCHAR(64) PRIMARY KEY,
-    product_key         VARCHAR(64) NOT NULL,   -- style-color-size-season
+    product_key         VARCHAR(64) NOT NULL,
     factory_key         VARCHAR(32) NOT NULL,
     should_cost_usd     DECIMAL(18, 4),
     standard_cost_usd   DECIMAL(18, 4),
@@ -266,57 +296,36 @@ CREATE TABLE gold_costing.fact_cost_variance (
 );
 ```
 
-**Ý nghĩa:** Một **golden grain** cho mỗi SKU–factory–kỳ; Power BI / SQL đọc từ đây thay vì Excel.
-
----
-
-### Chạy local để xem output
+### Chạy local
 
 ```bash
 pip install -r python/requirements.txt
-python python/ingest_plm_bom.py          # in JSON event Bronze
-python python/costing_reconciliation.py # in bảng variance + số alert
+python python/ingest_plm_bom.py
+python python/costing_reconciliation.py
 ```
 
 ---
-
-## Pain point được giải quyết
-
-| Pain point | Tác động kinh doanh | Trụ cột giải pháp |
-|------------|---------------------|-------------------|
-| BOM / version lệch giữa PLM và ERP | Sai standard cost, rò margin | Golden record + đối soát hàng ngày |
-| Tổng hợp costing bằng Excel | Chậm theo season, lỗi thủ công | Pipeline tự động + rule DQ |
-| Biến động FX / freight / MOQ | Landed cost không ổn định | Cost engine tham số hóa + alert |
-| Đa nhà máy, đa tiền tệ | COGS không nhất quán | MDM hub + chính sách FX |
-| Thiếu lineage & ownership | Rủi ro audit, UAT chậm | Governance + data catalog |
 
 ## Cấu trúc repository
 
 ```
-docs/           BRD, kiến trúc as-is / to-be, governance, roadmap
+docs/           BRD, kiến trúc, governance, roadmap
 sql/            DDL và query đối soát / variance
 python/         Mẫu ingest và reconciliation
-powerbi/        Ghi chú semantic model control tower
+powerbi/        Ghi chú semantic model
 data/           Dataset mẫu giả lập
-```
-
-## Chạy thử nhanh
-
-```bash
-pip install -r python/requirements.txt
-python python/costing_reconciliation.py
 ```
 
 ## Ánh xạ với JD
 
 | Yêu cầu công việc | Bằng chứng trong repo |
 |-------------------|------------------------|
-| Sở hữu end-to-end dữ liệu costing | BRD, DDL gold layer, doc governance |
-| Lãnh đạo dự án | Roadmap triển khai 90 ngày |
-| ERP / PLM / hệ thống costing | Kiến trúc, SQL đối soát BOM |
-| SQL, Power BI | Thư mục `sql/`, tài liệu Power BI |
-| Tự động hóa & cải tiến quy trình | Python ingest + pattern cảnh báo DQ |
-| Phối hợp đa bộ phận | RACI và rollout theo phase |
+| Sở hữu end-to-end dữ liệu costing | Mục 1 + DDL gold |
+| Lãnh đạo dự án | [Roadmap 90 ngày](docs/05-implementation-roadmap.md) |
+| ERP / PLM / costing | Mục 2 + SQL BOM |
+| SQL, Power BI | `sql/`, `powerbi/` |
+| Tự động hóa | Mục 3 Python + DQ |
+| Phối hợp đa bộ phận | RACI trong [BRD](docs/01-business-requirements.md) |
 
 ## Giấy phép
 
